@@ -21,7 +21,6 @@ import (
 var rnd *renderer.Render
 var db *mongo.Database
 var todoCollection *mongo.Collection
-var client *mongo.Client
 
 const (
 	hostname       = "mongodb://localhost:27017"
@@ -45,18 +44,6 @@ type (
 		CreatedAt time.Time `json:"createdAt"`
 	}
 )
-
-func init() {
-	fmt.Println("Starting application...")
-	rnd = renderer.New()
-	// connect to mongodb
-	client, error := mongo.Connect(options.Client().ApplyURI(dbURI))
-	checkErr(error, "failed connect to mongodb")
-
-	// get collections
-	todoCollection = client.Database(dbName).Collection(collectionName)
-
-}
 
 func fetchTodos(w http.ResponseWriter, r *http.Request) {
 
@@ -144,9 +131,18 @@ func updateTodo(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	fmt.Println("Application is in main function")
+
 	stopChan := make(chan os.Signal)
 	signal.Notify(stopChan, os.Interrupt)
+
+	fmt.Println("Starting application...")
+	rnd = renderer.New()
+	// connect to mongodb
+	client, error := mongo.Connect(options.Client().ApplyURI(dbURI))
+	checkErr(error, "failed connect to mongodb")
+
+	// get collections
+	todoCollection = client.Database(dbName).Collection(collectionName)
 
 	// define chi routes
 	r := chi.NewRouter()
