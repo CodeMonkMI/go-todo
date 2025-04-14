@@ -1,23 +1,8 @@
 package main
 
-// import (
-// 	"context"
-// 	"encoding/json"
-// 	"log"
-// 	"net/http"
-// 	"os"
-// 	"os/signal"
-// 	"string"
-// 	"time"
-
-// 	"github.com/go-chi/chi"
-// 	"github.com/go-chi/chi/middleware"
-// 	"github.com/thedevsaddam/renderer"
-// 	mgo "gopkg.in/mgo.v2"
-// 	"gopkg.in/mgo.v2/bson"
-// )
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -28,26 +13,30 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/thedevsaddam/renderer"
-	mgo "gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var rnd *renderer.Render
-var db *mgo.Database
+var db *mongo.Database
+var todoCollection *mongo.Collection
+var client *mongo.Client
 
 const (
 	hostname       = "mongodb://localhost:27017"
+	dbURI          = "mongodb://localhost:27017"
 	dbName         = "demo_todo"
 	collectionName = "todo"
-	port           = "4000"
+	port           = ":4000"
 )
 
 type (
 	todoModel struct {
-		ID        string    `bson:"id,omitempty"`
-		Title     string    `bson:"title"`
-		Completed bool      `bson:"completed"`
-		CreatedAt time.Time `bson:"createdAt"`
+		ID        bson.ObjectID `bson:"_id"`
+		Title     string        `bson:"title"`
+		Completed bool          `bson:"completed"`
+		CreatedAt time.Time     `bson:"createdAt"`
 	}
 	todo struct {
 		ID        string    `json:"id"`
@@ -60,37 +49,96 @@ type (
 func init() {
 	fmt.Println("Starting application...")
 	rnd = renderer.New()
-	session, mongoErr := mgo.Dial(hostname)
-	checkErr(mongoErr, "Failed to connect to mongo database ")
-	session.SetMode(mgo.Monotonic, true)
+	// connect to mongodb
+	client, error := mongo.Connect(options.Client().ApplyURI(dbURI))
+	checkErr(error, "failed connect to mongodb")
+
+	// get collections
+	todoCollection = client.Database(dbName).Collection(collectionName)
 
 }
 
 func fetchTodos(w http.ResponseWriter, r *http.Request) {
-	todos := []todoModel{}
-	if err := db.C(collectionName).Find(bson.M{}).All((&todos)); err != nil {
-		rnd.JSON(w, http.StatusProcessing, renderer.M{
-			"message": "Failed to fetch todos!",
-			"err":     err,
-		})
+
+	cursor, err := todoCollection.Find(context.TODO(), bson.D{{}})
+	if err != nil {
+		fmt.Println("Failed to fetch todos! from db")
+		responseError(w, err, "failed to fetch todos")
 		return
 	}
-	todoList := []todo{}
+	var todos []todoModel
+	err2 := cursor.All(context.TODO(), &todos)
+	if err2 != nil {
+		fmt.Println("Failed to unpack todos!")
+		log.Println(err2)
+		responseError(w, err2, "failed to fetch todos")
+		return
+
+	}
+
+	var formatTodos []todo
 	for _, t := range todos {
-		todoList = append(todoList, todo{
-			ID:        t.ID,
+
+		formatTodos = append(formatTodos, todo{
+			ID:        t.ID.Hex(),
 			Title:     t.Title,
 			Completed: t.Completed,
+			CreatedAt: t.CreatedAt,
 		})
 	}
+
 	rnd.JSON(w, http.StatusOK, renderer.M{
-		"message": "successfully fetched todos!",
-		"data":    todoList,
+		"data": formatTodos,
 	})
 }
 func createTodo(w http.ResponseWriter, r *http.Request) {
+	var newTodo todoModel
+	err := json.NewDecoder(r.Body).Decode(&newTodo)
+
+	if err != nil {
+		responseError(w, err, "Invalid request payload")
+		return
+	}
+
+	defer r.Body.Close()
+
+	if newTodo.Title == "" {
+		responseError(w, err, "Title is required")
+		return
+	}
+
+	newTodo.ID = bson.NewObjectID()
+	newTodo.CreatedAt = time.Now()
+	result, err := todoCollection.InsertOne(context.TODO(), newTodo)
+	if err != nil {
+		fmt.Println(err)
+		responseError(w, err, "Failed to create todo")
+		return
+	}
+	todoId := result.InsertedID.(bson.ObjectID)
+
+	var todoData todoModel
+	err3 := todoCollection.FindOne(context.TODO(), bson.D{{Key: "_id", Value: todoId}}).Decode(&todoData)
+	if err3 != nil {
+
+		responseError(w, err3, "Failed to create todo")
+		return
+	}
+
+	formatTodo := todo{
+		ID:        todoData.ID.Hex(),
+		Title:     todoData.Title,
+		Completed: todoData.Completed,
+		CreatedAt: todoData.CreatedAt,
+	}
+
+	rnd.JSON(w, http.StatusCreated, renderer.M{
+		"message": "Todo created successfully",
+		"data":    formatTodo,
+	})
 
 }
+
 func updateTodo(w http.ResponseWriter, r *http.Request) {
 
 }
@@ -135,6 +183,14 @@ func main() {
 	srv.Shutdown(ctx)
 	defer cancel()
 
+	// disconnect from mongodb
+	defer func() {
+		if err := client.Disconnect(context.TODO()); err != nil {
+			log.Println("Database client disconnected")
+			panic(err)
+		}
+	}()
+
 }
 
 func todoHandlers() http.Handler {
@@ -143,6 +199,14 @@ func todoHandlers() http.Handler {
 	r.Post("/", createTodo)
 	r.Put("/{id}", updateTodo)
 	return r
+}
+
+func responseError(w http.ResponseWriter, err error, msg string) {
+	rnd.JSON(w, http.StatusBadRequest, renderer.M{
+		"message": msg,
+		"err":     err,
+	})
+	return
 }
 
 func checkErr(e error, customMsg string) {
