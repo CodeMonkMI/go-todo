@@ -17,6 +17,10 @@ type (
 		Title     string `bson:"title"`
 		Completed bool   `bson:"completed"`
 	}
+	createTodoModel struct {
+		Title     string `bson:"title"`
+		Completed bool   `bson:"completed"`
+	}
 	todo struct {
 		ID        string    `json:"id"`
 		Title     string    `json:"title"`
